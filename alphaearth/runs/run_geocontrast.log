@@ -1,0 +1,36 @@
+nohup: ignoring input
+/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_phase1_switchable.py:379: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=not args.no_amp)
+Train ep1/50:   0%|          | 0/396 [00:00<?, ?it/s]Train ep1/50:   0%|          | 0/396 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_phase1_switchable.py", line 465, in <module>
+    train(args)
+  File "/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_phase1_switchable.py", line 386, in train
+    for x1, x2, aef, _, _ in pbar:
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 708, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1480, in _next_data
+    return self._process_data(data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1505, in _process_data
+    data.reraise()
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/_utils.py", line 733, in reraise
+    raise exception
+FileNotFoundError: Caught FileNotFoundError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/envs/rishabh_sat/lib/python3.12/site-packages/torch/utils/data/_utils/fetch.py", line 52, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+            ~~~~~~~~~~~~^^^^^
+  File "/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_phase1_switchable.py", line 178, in __getitem__
+    img_path = resolve_image_path(r["region"], r["filename"])
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_phase1_switchable.py", line 101, in resolve_image_path
+    raise FileNotFoundError(f"Image not found: {filename} (searched under {base})")
+FileNotFoundError: Image not found: 23.6997_89.7530.png (searched under /home/rishabh.mondal/Brick-Kilns-project/ijcai_2026_processed_data/final_data/bangladesh)
+
