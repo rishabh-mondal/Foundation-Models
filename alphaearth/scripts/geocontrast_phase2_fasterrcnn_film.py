@@ -40,14 +40,11 @@ CUDA_VISIBLE_DEVICES=0 nohup python -u geocontrast_phase2_fasterrcnn_film.py \
   --val_csv     /.../pak_punjab_val_per_image_aef.csv \
   > phase2_frcnn.log 2>&1 &
 """
-
 import os, csv, math, logging, argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 import numpy as np
 from PIL import Image
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,6 +54,9 @@ from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchmetrics.detection import MeanAveragePrecision
 from tqdm import tqdm
+
+
+
 
 # -------------------
 # Paths (EDIT if needed)
