@@ -346,6 +346,15 @@ def build_param_groups(model, backbone_lr, film_lr, head_lr, weight_decay):
         {"params": head_params, "lr": head_lr,     "weight_decay": weight_decay},
     ]
 
+
+def print_trainable_params(model):
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pct = 100.0 * trainable / max(1, total)
+    print(f"[PARAMS] trainable={trainable}/{total} ({pct:.2f}%)")
+
+
+
 # -------------------
 # Train / Validate / Evaluate
 # -------------------
@@ -371,25 +380,45 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch):
 
 @torch.no_grad()
 def validate(model, data_loader, device, epoch):
+    """
+    Lightweight validation used during training.
+    Computes mAP@50 aggregated over classes (no classwise breakdown).
+    """
     model.eval()
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=False)
+    metric = MeanAveragePrecision(
+        box_format="xyxy",
+        iou_type="bbox",
+        iou_thresholds=[0.5],   # make this strictly @50
+        class_metrics=False
+    )
     for batch in tqdm(data_loader, desc=f"Val ep{epoch+1}"):
-        if batch is None: continue
+        if batch is None:
+            continue
         images, targets, conds = batch
         images  = [img.to(device) for img in images]
-        targets = [{k: v.to(device) for k,v in t.items()} for t in targets]
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         model.backbone.set_conditioning(conds.to(device))
-        out = model(images)
-        out = [{k: v.detach().cpu() for k,v in o.items()} for o in out]
-        tg  = [{k: v.detach().cpu() for k,v in t.items()} for t in targets]
-        metric.update(out, tg)
+        preds = model(images)
+
+        preds = [{k: v.detach().cpu() for k, v in p.items()} for p in preds]
+        tgts  = [{k: v.detach().cpu() for k, v in t.items()} for t in targets]
+        metric.update(preds, tgts)
+
     res = metric.compute()
-    return float(res.get("map", torch.tensor(0.0))), float(res.get("map_50", torch.tensor(0.0)))
+    # With iou_thresholds=[0.5], 'map' == 'map_50'
+    map50 = float(res.get("map", torch.tensor(0.0)))
+    return map50, map50
 
 @torch.no_grad()
-def evaluate_region(model, region_key: str, split: str, device, batch_size=8, num_workers=8, image_size=800,
+def evaluate_region(model, region_key: str, split: str, device,
+                    batch_size=8, num_workers=8, image_size=800,
                     csv_path: Optional[str]=None, pretty=""):
-    # (unchanged)
+    """
+    Final evaluation:
+      - CA mAP@50 (class-agnostic, labels collapsed)
+      - MC mAP@50 (macro over classes WITH GT only; classes w/ no GT are excluded)
+      - Per-class AP@50 only for classes WITH GT (no -100.0 surprises)
+    """
     base = Path(REGION_ROOTS[region_key]) / split / "images"
     if csv_path is not None and Path(csv_path).exists():
         ds = BrickKilnDetCSV(csv_path, split=split, image_size=image_size)
@@ -402,37 +431,86 @@ def evaluate_region(model, region_key: str, split: str, device, batch_size=8, nu
             w.writeheader(); w.writerows(rows)
         ds = BrickKilnDetCSV(str(tmp), split=split, image_size=image_size)
 
-    dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                    pin_memory=True, collate_fn=collate_fn)
+    dl = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                    num_workers=num_workers, pin_memory=True, collate_fn=collate_fn)
+
     model.eval()
-    metric_class = MeanAveragePrecision(box_format='xyxy', class_metrics=True,  iou_thresholds=[0.5])
-    metric_agn   = MeanAveragePrecision(box_format='xyxy', class_metrics=False, iou_thresholds=[0.5])
+    metric_class = MeanAveragePrecision(
+        box_format='xyxy',
+        iou_type='bbox',
+        class_metrics=True,
+        iou_thresholds=[0.5]
+    )
+    metric_agn = MeanAveragePrecision(
+        box_format='xyxy',
+        iou_type='bbox',
+        class_metrics=False,
+        iou_thresholds=[0.5]
+    )
+
     for batch in tqdm(dl, desc=f"Test [{pretty or region_key}]"):
-        if batch is None: continue
+        if batch is None:
+            continue
         images, targets, conds = batch
         images = [i.to(device) for i in images]
         model.backbone.set_conditioning(conds.to(device))
-        preds  = model(images)
-        preds = [{k: v.to('cpu') for k,v in p.items()} for p in preds]
-        tgts  = [{k: v.to('cpu') for k,v in t.items()} for t in targets]
+        preds = model(images)
+
+        preds = [{k: v.to('cpu') for k, v in p.items()} for p in preds]
+        tgts  = [{k: v.to('cpu') for k, v in t.items()} for t in targets]
+
+        # Class-wise (native labels)
         metric_class.update(preds, tgts)
-        preds_agn = [{'boxes': p['boxes'], 'scores': p['scores'], 'labels': torch.ones_like(p['labels'])} for p in preds]
-        tgts_agn  = [{'boxes': t['boxes'], 'labels': torch.ones_like(t['labels'])} for t in tgts]
+
+        # Class-agnostic: collapse labels to 1
+        preds_agn = [
+            {'boxes': p['boxes'], 'scores': p['scores'], 'labels': torch.ones_like(p['labels'])}
+            for p in preds
+        ]
+        tgts_agn = [
+            {'boxes': t['boxes'], 'labels': torch.ones_like(t['labels'])}
+            for t in tgts
+        ]
         metric_agn.update(preds_agn, tgts_agn)
+
+    # ----- Compute results -----
     res_c = metric_class.compute()
     res_a = metric_agn.compute()
-    ca50  = float(res_a['map_50'])*100.0
-    mc50  = float(res_c.get('map', torch.tensor(0.0)))*100.0
-    classes = res_c.get('classes', torch.tensor([])).tolist() if 'classes' in res_c else []
-    mpc     = res_c.get('map_per_class', torch.tensor([])).tolist() if 'map_per_class' in res_c else []
-    per_cls = {int(c): v*100.0 for c,v in zip(classes, mpc)}
+
+    # Class-agnostic mAP@50 (0..1)
+    ca50 = float(res_a.get('map', torch.tensor(0.0))) * 100.0  # map == map_50 since iou=[0.5]
+
+    # Class-wise AP@50 list and classes
+    classes_t = res_c.get('classes', torch.empty(0, dtype=torch.int64))
+    apc_t     = res_c.get('map_per_class', torch.empty(0))
+    classes   = classes_t.tolist()
+    apc       = apc_t.tolist()
+
+    # Filter out undefined classes (AP = -1.0 => no GT)
+    valid = [(c, ap) for c, ap in zip(classes, apc) if ap is not None and ap >= 0.0]
+    na_cls = [c for c, ap in zip(classes, apc) if ap is None or ap < 0.0]
+
+    if len(valid) > 0:
+        mc50 = float(sum(ap for _, ap in valid) / len(valid)) * 100.0
+        per_cls = {int(c): float(ap)*100.0 for c, ap in valid}  # only valid classes
+    else:
+        mc50 = 0.0
+        per_cls = {}
+
+    # ----- Pretty print -----
     print("\n" + "="*84)
     print(f" Region: {pretty or region_key} — {split}")
     print("="*84)
     print(f"{'CA mAP@50':<12}{'MC mAP@50':<12}")
     print("-"*84)
     print(f"{ca50:<12.2f}{mc50:<12.2f}")
+    if na_cls:
+        print(f"(Note) Excluded classes with no GT in this split: {na_cls}")
+    if per_cls:
+        pcs = ", ".join([f"c{c}={ap:.2f}" for c, ap in sorted(per_cls.items())])
+        print(f"Per-class AP@50 (valid only): {pcs}")
     print("="*84 + "\n")
+
     return ca50, mc50, per_cls
 
 # -------------------
@@ -440,21 +518,21 @@ def evaluate_region(model, region_key: str, split: str, device, batch_size=8, nu
 # -------------------
 def parse_args():
     ap = argparse.ArgumentParser("Phase 2: FasterRCNN + DINOv3 (GeoContrast-init) + FiLM(AEF) + Freezing")
-    ap.add_argument("--geocontrast_ckpt", default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/scripts/geocontrast_dinov3_vitl16_map_224.pth", help="Path to Phase-1 saved encoder (.pth)")
+    ap.add_argument("--geocontrast_ckpt", default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/checkpoints/dinov3_geocontrast_map_all_splits.pth", help="Path to Phase-1 saved encoder (.pth)")
     ap.add_argument("--num_classes", type=int, default=4)
     ap.add_argument("--image_size",  type=int, default=800)
-    ap.add_argument("--batch_size",  type=int, default=8)
+    ap.add_argument("--batch_size",  type=int, default=16)
     ap.add_argument("--num_workers", type=int, default=8)
-    ap.add_argument("--epochs",      type=int, default=10)
+    ap.add_argument("--epochs",      type=int, default=6)
     ap.add_argument("--backbone_lr", type=float, default=1e-5)
     ap.add_argument("--film_lr",     type=float, default=1e-4)
     ap.add_argument("--head_lr",     type=float, default=1e-4)
     ap.add_argument("--weight_decay",type=float, default=0.04)
 
     # Regions / splits
-    ap.add_argument("--train_region", default="uttar_pradesh", choices=list(REGION_ROOTS.keys()))
-    ap.add_argument("--in_region",    default="uttar_pradesh", choices=list(REGION_ROOTS.keys()))
-    ap.add_argument("--oor_regions",  nargs="*", default=["pak_punjab","bangladesh"])
+    ap.add_argument("--train_region", default="bangladesh", choices=list(REGION_ROOTS.keys()))
+    ap.add_argument("--in_region",    default="bangladesh", choices=list(REGION_ROOTS.keys()))
+    ap.add_argument("--oor_regions",  nargs="*", default=["pak_punjab","uttar_pradesh"])
     ap.add_argument("--train_split",  default="train")
     ap.add_argument("--val_split",    default="val")
     ap.add_argument("--test_split",   default="test")
@@ -465,10 +543,10 @@ def parse_args():
                     help="Optional trained Phase-2 detector .pth to load before eval")
 
     # CSVs for per-image AEF
-    ap.add_argument("--train_csv", default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/data/iclr_2026_processed_data/final_data/uttar_pradesh/uttar_pradesh_train_per_image_aef.csv")
-    ap.add_argument("--val_csv",   default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/data/iclr_2026_processed_data/final_data/uttar_pradesh/uttar_pradesh_val_per_image_aef.csv")
+    ap.add_argument("--train_csv", default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/data/iclr_2026_processed_data/final_data/pak_punjab/train/bangladesh_train_per_image_aef.csv")
+    ap.add_argument("--val_csv",   default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/data/iclr_2026_processed_data/final_data/pak_punjab/val/bangladesh_val_per_image_aef.csv")
 
-    ap.add_argument("--eval_csv_map", nargs="*", default=[],
+    ap.add_argument("--eval_csv_map", nargs="*", default="/home/rishabh.mondal/Brick-Kilns-project/ijcai_2025_kilns/Foundation-Models/alphaearth/csvs",
                     help="pairs like: region=/abs/path/to/csv")
 
     ap.add_argument("--results_dir",  default="phase2_runs")
@@ -482,6 +560,10 @@ def parse_args():
                     help="When exiting the freeze window, unfreeze only last K blocks (if >0). Otherwise unfreeze all.")
     ap.add_argument("--freeze_film_during_freeze", action="store_true",
                     help="Also freeze FiLM during the freeze window")
+    ap.add_argument("--freeze_backbone_from", type=int, default=-1,
+                help="At this epoch (0-based), freeze backbone for the rest of training (-1 disables).")
+    ap.add_argument("--freeze_film_after", action="store_true",
+                help="Also freeze FiLM when --freeze_backbone_from triggers.")
     return ap.parse_args()
 
 def rebuild_optimizer(model, args):
@@ -538,6 +620,7 @@ def main():
             freeze_all_backbone(model, freeze_film=args.freeze_film_during_freeze)
             print(f"[FREEZE] Epochs 1..{args.freeze_backbone_for}: backbone frozen (mode=all), "
                   f"FiLM {'frozen' if args.freeze_film_during_freeze else 'trainable'}")
+            
         elif args.freeze_mode == "last_n":
             # During freeze window, we still freeze *all* (standard practice),
             # then after the window we unfreeze last K blocks.
@@ -552,7 +635,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
 
     ckpt_dir = Path(args.results_dir); ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_ckpt = ckpt_dir / f"best_film_geocontrast_map_all_val_map50_3efbf_t_all_{args.train_region}.pth"
+    best_ckpt = ckpt_dir / f"best_film_geocontrast_phase2_freeze_F_train_then_freeze_bb_film_{args.geocontrast_ckpt.split('/')[-1].split('.')[0]}_{args.train_region}.pth"
 
     # ======== TRAIN or SKIP ========
     if not args.eval_only:
@@ -571,6 +654,20 @@ def main():
                 # Rebuild scheduler for the remaining epochs (simple, robust)
                 remaining = max(1, args.epochs - ep)
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
+
+            if args.freeze_backbone_from >= 0 and ep == args.freeze_backbone_from:
+                freeze_all_backbone(model, freeze_film=args.freeze_film_after)
+                who = "backbone + FiLM" if args.freeze_film_after else "backbone only"
+                print(f"[FREEZE-AFTER] Epoch {ep+1}: now freezing {who} for the rest of training.")
+                # Rebuild optimizer so only still-trainable params (heads, etc.) keep updating
+                optimizer = rebuild_optimizer(model, args)
+                remaining = max(1, args.epochs - ep)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
+                # Optional visibility
+                try:
+                    print_trainable_params(model)
+                except NameError:
+                    pass    
 
             tl = train_one_epoch(model, optimizer, train_loader, device, ep)
             mv, mv50 = validate(model, val_loader, device, ep)
@@ -629,41 +726,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-# Freeze both backbone and FiLM for first 2 epochs, then train everything
-
-
-# CUDA_VISIBLE_DEVICES=1 nohup python -u geocontrast_phase2_fasterrcnn_film_freeze.py \
-#   --epochs 5 \
-#   --freeze_backbone_for 2 \
-#   --freeze_mode all \
-#   --freeze_film_during_freeze
-# > Freeze_both_backbone_and_FiLM_for_first_2_epochs_then_train_everything 2>&1 &
-
-
-
-# Train 10 epochs; freeze first 4 epochs, then unfreeze only the last 6 ViT blocks
-
-# CUDA_VISIBLE_DEVICES=3 nohup python -u geocontrast_phase2_fasterrcnn_film_freeze.py \
-#   --epochs 5 \
-#   --freeze_backbone_for 3 \
-#   --freeze_mode last_n --unfreeze_last_blocks 6
-# > Train_5_epochs_freeze_backbone_for_first_3_train_FiLM_heads_during_freeze_then_unfreeze_entire_backbone.log 2>&1 &
-
-
-# CUDA_VISIBLE_DEVICES=1 nohup python -u geocontrast_phase2_fasterrcnn_film_freeze.py \
-#   --epochs 5 \
-#   --freeze_backbone_for 3 \
-#   --freeze_mode all \
-#   --backbone_lr 1e-5 --film_lr 1e-4 --head_lr 1e-4
-# > Train_5_epochs_freeze_backbone_first_3_train_FiLM_heads_during_freeze_then_unfreeze_backbone 2>&1 &
-
-
-
-# === Train: freeze backbone for first 2 epochs; also freeze FiLM ===
-# CUDA_VISIBLE_DEVICES=1 nohup python -u geocontrast_phase2_fasterrcnn_film_freeze.py \
-#   --epochs 5 \
-#   --freeze_backbone_for 2 \
-#   --freeze_mode all \
-#   --freeze_film_during_freeze \
-#   > phase2_up_freezeALL_e5_f2_gpu1.log 2>&1 &
