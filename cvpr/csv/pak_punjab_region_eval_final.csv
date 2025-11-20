@@ -1,0 +1,4 @@
+Region,Split,CA_mAP50,MC_mAP50,CFCBK_mAP50,FCBK_mAP50,Zigzag_mAP50,GT_CFCBK,GT_FCBK,GT_Zigzag,Zero_GT,Low_Support_Thresh
+pak_punjab IN REGION test,test,75.36,35.85,0.00,68.89,2.82,0,751,82,1,5
+Uttar Pradesh OOR test,test,58.61,13.11,0.00,37.25,2.08,77,643,270,,5
+Bangladesh OOR test,test,39.49,4.89,0.00,7.25,2.53,0,146,553,1,5
